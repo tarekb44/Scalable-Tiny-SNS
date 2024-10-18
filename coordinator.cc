@@ -20,7 +20,7 @@
 #include <unistd.h>
 #include <google/protobuf/util/time_util.h>
 #include <grpc++/grpc++.h>
-#include<glog/logging.h>
+#include <glog/logging.h>
 
 #include "coordinator.grpc.pb.h"
 #include "coordinator.pb.h"
@@ -51,6 +51,7 @@ struct zNode{
     std::time_t last_heartbeat;
     bool missed_heartbeat;
     bool isActive();
+    int missed_heartbeat_count;
 
 };
 
@@ -80,32 +81,28 @@ bool zNode::isActive(){
     return status;
 }
 
-
 class CoordServiceImpl final : public CoordService::Service {
+    std::thread heartbeat_thread_;
 
-Status Heartbeat(ServerContext* context, const ServerInfo* serverinfo, Confirmation* confirmation) override {
-  std::lock_guard<std::mutex> lock(v_mutex);
+    Status Heartbeat(ServerContext* context, const ServerInfo* serverinfo, Confirmation* confirmation) override {
+        std::lock_guard<std::mutex> lock(v_mutex);
 
-    // Use the correct field names from your .proto file
-    int server_id = serverinfo->serverid();
-    std::string server_ip = serverinfo->hostname();
-    std::string server_port = serverinfo->port();
-    std::string type = serverinfo->type(); // If needed
+        int server_id = serverinfo->serverid();
+        std::string server_ip = serverinfo->hostname();
+        std::string server_port = serverinfo->port();
+        std::string type = serverinfo->type();
 
-    // Since 'cluster_id' is not defined, you might need to extract it from 'type' or adjust your .proto file
-    int cluster_id = extractClusterId(type);
-        // Validate cluster ID
-        if (cluster_id < 1 || cluster_id > 3) {
-            return Status(grpc::INVALID_ARGUMENT, "Invalid cluster ID");
-        }
+        int cluster_id = extractClusterId(type);
 
-        // Find the corresponding cluster vector
-        std::vector<zNode*>& cluster = clusters[cluster_id - 1];
+        if (cluster_id < 1 || cluster_id > 3)
+            return Status::OK;
 
-        // Find or add the server in the cluster
+        std::vector<zNode*>& cluster = clusters[cluster_id-1];
+
+        // add server to the cluster
         int index = findServer(cluster, server_id);
-        if (index == -1) {
-            // Server not found, add it
+        if (index == -1) // if not foung
+        {
             zNode* new_server = new zNode();
             new_server->serverID = server_id;
             new_server->hostname = server_ip;
@@ -113,97 +110,72 @@ Status Heartbeat(ServerContext* context, const ServerInfo* serverinfo, Confirmat
             new_server->type = "Server";
             new_server->last_heartbeat = getTimeNow();
             new_server->missed_heartbeat = false;
-            cluster.push_back(new_server);
 
-            std::cout << "Registered new server: Cluster " << cluster_id << ", Server " << server_id << std::endl;
+            cluster.push_back(new_server);
+            
+            log(INFO, "Registered new server: Cluster " << cluster_id << " Server " << server_id);
         } else {
-            // Update existing server's heartbeat time
             zNode* server = cluster[index];
             server->last_heartbeat = getTimeNow();
             server->missed_heartbeat = false;
-            // std::cout << "Heartbeat received from Server " << server_id << " in Cluster " << cluster_id << std::endl;
         }
+        
         confirmation->set_status(true);
-        log(INFO, "Heartbeat received from server " << server_id);
+        
+        // log(INFO, "Heartbeat received from server " << server_id);
+
         return Status::OK;
     }
 
+    //function returns the server information for requested client id
+    //this function assumes there are always 3 clusters and has math
+    //hardcoded to represent this.
     Status GetServer(ServerContext* context, const ID* id, ServerInfo* serverinfo) override {
-    int client_id = id->id(); // Use 'id()' method
+        int client_id = id->id(); 
+        int cluster_id = ((client_id - 1) % 3) + 1;
 
-    int cluster_id = ((client_id - 1) % 3) + 1;
-    int server_id = 1; // Assuming server IDs start from 1
+
+        int server_id = 1;
 
         std::lock_guard<std::mutex> lock(v_mutex);
 
-        // Get the cluster
         std::vector<zNode*>& cluster = clusters[cluster_id - 1];
 
-        // Find the server in the cluster
         int index = findServer(cluster, server_id);
-        if (index == -1) {
-            return Status(grpc::NOT_FOUND, "Server not found");
-        }
 
+        if (index == -1)
+            return Status::OK;
+        
         zNode* server = cluster[index];
 
-        // Check if the server is active
-        if (!server->isActive()) {
-            return Status(grpc::UNAVAILABLE, "Server is not active");
-        }
+        if (!server->isActive())
+            return Status::OK;
 
-        // Set the server info to return to the client
-serverinfo->set_serverid(server->serverID);
-    serverinfo->set_hostname(server->hostname);
-    serverinfo->set_port(server->port);
-    serverinfo->set_type("Cluster" + std::to_string(cluster_id));
+        serverinfo->set_serverid(server->serverID);
+        serverinfo->set_hostname(server->hostname);
+        serverinfo->set_port(server->port);
+        serverinfo->set_type("Cluster" + std::to_string(cluster_id));
 
-        std::cout << "Client " << client_id << " assigned to Server " << server->serverID
-                  << " in Cluster " << cluster_id << std::endl;
+        log(INFO, "Client " << client_id << " assigned to Server " << server->serverID << " in Cluster " << cluster_id);
 
         return Status::OK;
     }
 
-    std::thread heartbeat_thread_;
     int extractClusterId(const std::string& type) {
-        // Assuming 'type' is formatted as "ClusterX" where X is the cluster ID
-        if (type.find("Cluster") == 0) {
+        if (type.find("Cluster") == 0)
             return std::stoi(type.substr(7));
-        }
-        // Default or error handling
-        return -1;
-    }
-   int findServer(const std::vector<zNode*>& v, int id) {
-        for (size_t i = 0; i < v.size(); ++i) {
-            if (v[i]->serverID == id) {
-                return i;
-            }
-        }
+
         return -1;
     }
 
+    int findServer(const std::vector<zNode*>& v, int id) {
+        for (size_t i = 0; i < v.size(); ++i)
+            if (v[i]->serverID == id)
+                return i;
+        return -1;
+    }
 };
 
-
-void checkHeartbeat() {
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(3));
-
-        std::lock_guard<std::mutex> lock(v_mutex);
-
-        for (auto& cluster : clusters) {
-            for (auto& server : cluster) {
-                if (difftime(getTimeNow(), server->last_heartbeat) > 10) {
-                    if (!server->missed_heartbeat) {
-                        server->missed_heartbeat = true;
-                        std::cout << "Server " << server->serverID << " in Cluster "
-                                    << ((server->serverID - 1) % 3) + 1 << " missed heartbeat." << std::endl;
-                    }
-                }
-            }
-        }
-    }
-}
 void RunServer(std::string port_no){
     //start thread to check heartbeats
     std::thread hb(checkHeartbeat);
@@ -228,21 +200,58 @@ void RunServer(std::string port_no){
 }
 
 int main(int argc, char** argv) {
+
     std::string port = "3010";
     int opt = 0;
     while ((opt = getopt(argc, argv, "p:")) != -1){
-    switch(opt) {
-        case 'p':
-            port = optarg;
-            break;
-        default:
-            std::cerr << "Invalid Command Line Argument\n";
-            return 1;
+        switch(opt) {
+            case 'p':
+                port = optarg;
+                break;
+            default:
+                std::cerr << "Invalid Command Line Argument\n";
         }
     }
     RunServer(port);
     return 0;
 }
+
+
+
+void checkHeartbeat(){
+    while(true){
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        std::lock_guard<std::mutex> lock(v_mutex);
+
+        for (auto& cluster : clusters){
+            for(auto it = cluster.begin(); it != cluster.end();){
+                zNode* s = *it;
+                double time_diff = difftime(getTimeNow(), s->last_heartbeat);
+
+                if(time_diff > 10)
+                {
+                    s->missed_heartbeat = true;
+                    s->missed_heartbeat_count++;
+
+                    log(INFO, "Missed heartbeat from server " << s->serverID << ". Count: " << s->missed_heartbeat_count);
+
+                    if(s->missed_heartbeat_count >= 5){
+                        log(INFO, "Removing server " << s->serverID << " from cluster due to 5 consecutive missed heartbeats.");
+                        it = cluster.erase(it);
+                        delete s;
+                        continue;
+                    }
+                } else
+                {
+                    s->missed_heartbeat = false;
+                    s->missed_heartbeat_count = 0;
+                }
+                ++it;
+            }
+        }
+    }
+}
+
 
 std::time_t getTimeNow(){
     return std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());

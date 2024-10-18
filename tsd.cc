@@ -1,3 +1,36 @@
+/*
+ *
+ * Copyright 2015, Google Inc.
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are
+ * met:
+ *
+ *     * Redistributions of source code must retain the above copyright
+ * notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above
+ * copyright notice, this list of conditions and the following disclaimer
+ * in the documentation and/or other materials provided with the
+ * distribution.
+ *     * Neither the name of Google Inc. nor the names of its
+ * contributors may be used to endorse or promote products derived from
+ * this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ */
+
 #include <ctime>
 
 #include <google/protobuf/timestamp.pb.h>
@@ -44,15 +77,31 @@ using csce662::Confirmation;
 namespace fs = std::filesystem;
 
 struct Client {
-    std::string username;
-    bool connected = true;
-    ServerReaderWriter<Message, Message>* stream = nullptr;
-    bool operator==(const Client& c1) const {
-        return (username == c1.username);
-    }
+  std::string username;
+  bool connected = true;
+  int following_file_size = 0;
+  std::vector<Client*> client_followers;
+  std::vector<Client*> client_following;
+  ServerReaderWriter<Message, Message>* stream = 0;
+  bool operator==(const Client& c1) const{
+    return (username == c1.username);
+  }
 };
 
-// Helper function to get current time in seconds
+//Vector that stores every client that has been created
+std::vector<Client*> client_db;
+
+//Helper function used to find a Client object given its username
+int find_user(std::string username){
+  int index = 0;
+  for(Client* c : client_db){
+    if(c->username == username)
+      return index;
+    index++;
+  }
+  return -1;
+}
+
 std::time_t getTimeNow() {
     return std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
 }
@@ -61,13 +110,11 @@ class SNSServiceImpl final : public SNSService::Service {
 public:
     SNSServiceImpl(const std::string& server_dir)
         : server_dir_(server_dir) {
-        // Start the timeline monitoring thread
         monitor_thread_ = std::thread(&SNSServiceImpl::monitorTimelines, this);
         monitor_thread_.detach();
     }
 
     ~SNSServiceImpl() {
-        // Destructor to join the monitoring thread if necessary
         if (monitor_thread_.joinable()) {
             monitor_thread_.join();
         }
@@ -75,49 +122,89 @@ public:
 
     // Implement the SNSService methods
     Status List(ServerContext* context, const Request* request, ListReply* list_reply) override {
-        log(INFO, "Serving List Request from: " + request->username());
-        std::lock_guard<std::mutex> lock(client_db_mutex_);
-
-        for (const auto& client_pair : client_db_) {
-            list_reply->add_all_users(client_pair.first);
+        log(INFO,"Serving List Request from: " + request->username()  + "\n");
+        
+        Client* user = client_db[find_user(request->username())];
+    
+        int index = 0;
+        for(Client* c : client_db){
+        list_reply->add_all_users(c->username);
         }
-
-        // For this implementation, we'll leave followers empty as per the current requirements
+        std::vector<Client*>::const_iterator it;
+        for(it = user->client_followers.begin(); it!=user->client_followers.end(); it++){
+        list_reply->add_followers((*it)->username);
+        }
         return Status::OK;
     }
 
     Status Follow(ServerContext* context, const Request* request, Reply* reply) override {
-        // Follow functionality will be properly implemented in MP2.2
+
+        std::string username1 = request->username();
+        std::string username2 = request->arguments(0);
+        log(INFO,"Serving Follow Request from: " + username1 + " for: " + username2 + "\n");
+
+        int join_index = find_user(username2);
+        if(join_index < 0 || username1 == username2)
+        reply->set_msg("Join Failed -- Invalid Username");
+        else{
+        Client *user1 = client_db[find_user(username1)];
+        Client *user2 = client_db[join_index];      
+        if(std::find(user1->client_following.begin(), user1->client_following.end(), user2) != user1->client_following.end()){
+        reply->set_msg("Join Failed -- Already Following User");
+            return Status::OK;
+        }
+        user1->client_following.push_back(user2);
+        user2->client_followers.push_back(user1);
         reply->set_msg("Follow Successful");
-        return Status::OK;
+        }
+        return Status::OK; 
     }
 
     Status UnFollow(ServerContext* context, const Request* request, Reply* reply) override {
-        // UnFollow functionality will be properly implemented in MP2.2
+        std::string username1 = request->username();
+        std::string username2 = request->arguments(0);
+        log(INFO,"Serving Unfollow Request from: " + username1 + " for: " + username2);
+    
+        int leave_index = find_user(username2);
+        if(leave_index < 0 || username1 == username2) {
+        reply->set_msg("Unknown follower");
+        } else{
+        Client *user1 = client_db[find_user(username1)];
+        Client *user2 = client_db[leave_index];
+        if(std::find(user1->client_following.begin(), user1->client_following.end(), user2) == user1->client_following.end()){
+        reply->set_msg("You are not a follower");
+            return Status::OK;
+        }
+        
+        user1->client_following.erase(find(user1->client_following.begin(), user1->client_following.end(), user2)); 
+        user2->client_followers.erase(find(user2->client_followers.begin(), user2->client_followers.end(), user1));
         reply->set_msg("UnFollow Successful");
+        }
         return Status::OK;
     }
 
     Status Login(ServerContext* context, const Request* request, Reply* reply) override {
+        Client* c = new Client();
         std::string username = request->username();
-        log(INFO, "Serving Login Request: " + username);
-        std::lock_guard<std::mutex> lock(client_db_mutex_);
-
-        if (client_db_.find(username) == client_db_.end()) {
-            // New client
-            Client* new_client = new Client();
-            new_client->username = username;
-            client_db_[username] = new_client;
-            reply->set_msg("Login Successful!");
-        } else {
-            // Existing client
-            Client* existing_client = client_db_[username];
-            if (existing_client->connected) {
-                reply->set_msg("you have already joined");
-            } else {
-                existing_client->connected = true;
-                reply->set_msg("Welcome Back " + username);
-            }
+        log(INFO, "Serving Login Request: " + username + "\n");
+        
+        int user_index = find_user(username);
+        if(user_index < 0){
+        c->username = username;
+        client_db.push_back(c);
+        reply->set_msg("Login Successful!");
+        }
+        else{
+        Client *user = client_db[user_index];
+        if(user->connected) {
+        log(WARNING, "User already logged on");
+            reply->set_msg("you have already joined");
+        }
+        else{
+            std::string msg = "Welcome Back " + user->username;
+        reply->set_msg(msg);
+            user->connected = true;
+        }
         }
         return Status::OK;
     }
@@ -137,22 +224,19 @@ public:
                 }
             }
 
-            // Construct the file path
             std::string filename = server_dir_ + "/" + username + ".txt";
 
-            // Write the current message to the user's timeline file
             if (message.msg() != "Set Stream") {
                 std::ofstream user_file(filename, std::ios::app);
-                if (user_file.is_open()) {
+                if (user_file.is_open())
+                {
                     std::string time = google::protobuf::util::TimeUtil::ToString(message.timestamp());
                     user_file << "T " << time << "\n";
                     user_file << "U " << username << "\n";
                     user_file << "W " << message.msg() << "\n\n";
                 }
-            } else {
-                // Send the latest posts when the client connects
+            } else
                 sendLatestPosts(client);
-            }
         }
 
         // Client disconnected
@@ -170,7 +254,6 @@ private:
     std::mutex client_db_mutex_;
     std::thread monitor_thread_;
 
-    // Function to monitor timeline files and resend posts if updated
     void monitorTimelines() {
         while (true) {
             std::this_thread::sleep_for(std::chrono::seconds(5)); // Check every 5 seconds
@@ -187,24 +270,19 @@ private:
                         auto duration = current_time - last_write_time;
                         auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
 
-                        if (seconds <= 30) {
-                            // File was modified in the last 30 seconds
-                            // Re-send the latest 20 posts
+                        if (seconds <= 30) 
                             sendLatestPosts(client);
-                        }
                     }
                 }
             }
         }
     }
 
-    // Function to send the latest 20 posts to the client
     void sendLatestPosts(Client* client) {
         std::string filename = server_dir_ + "/" + client->username + ".txt";
         std::ifstream user_file(filename);
-        if (!user_file.is_open()) {
+        if (!user_file.is_open())
             return;
-        }
 
         std::vector<std::string> lines;
         std::string line;
@@ -213,17 +291,15 @@ private:
             if (line.empty()) {
                 lines.push_back(post);
                 post.clear();
-            } else {
+            } else
                 post += line + "\n";
-            }
         }
         if (!post.empty()) {
             lines.push_back(post);
         }
-
-        // Get the last 20 posts
         int start = std::max(0, static_cast<int>(lines.size()) - 20);
-        for (int i = start; i < lines.size(); ++i) {
+        for (int i = start; i < lines.size(); ++i)
+        {
             Message msg;
             msg.set_msg(lines[i]);
             client->stream->Write(msg);
@@ -232,24 +308,25 @@ private:
 };
 
 void sendHeartbeat(const std::string& coordinator_ip, const std::string& coordinator_port,
-                   const std::string& cluster_id, const std::string& server_id, const std::string& port) {
+                   const std::string& cluster_id, const std::string& server_id, const std::string& port, std::atomic<bool>& server_running) {
     std::string coord_address = coordinator_ip + ":" + coordinator_port;
     auto coord_stub = csce662::CoordService::NewStub(grpc::CreateChannel(coord_address, grpc::InsecureChannelCredentials()));
 
     csce662::ServerInfo server_info;
-    // If 'cluster_id' is not in ServerInfo, you can include it in 'type' or another field, or modify the proto file.
     server_info.set_serverid(std::stoi(server_id));
-    server_info.set_hostname("localhost");  // Adjust if necessary
+    server_info.set_hostname("localhost");
     server_info.set_port(port);
-    server_info.set_type("Cluster" + cluster_id);  // If you want to include cluster info
+    server_info.set_type("Cluster" + cluster_id);
 
-    while (true) {
+    while (server_running) {
         grpc::ClientContext context;
         csce662::Confirmation confirm;
         grpc::Status status = coord_stub->Heartbeat(&context, server_info, &confirm);
 
         if (!status.ok()) {
             std::cerr << "Failed to send heartbeat to coordinator: " << status.error_message() << std::endl;
+            server_running = false;
+            break;
         } else {
             log(INFO, "Heartbeat sent to coordinator.");
         }
@@ -258,7 +335,7 @@ void sendHeartbeat(const std::string& coordinator_ip, const std::string& coordin
     }
 }
 
-void RunServer(const std::string& port_no, const std::string& server_dir) {
+void RunServer(const std::string& port_no, const std::string& server_dir, std::atomic<bool>& server_running) {
     std::string server_address = "0.0.0.0:" + port_no;
     SNSServiceImpl service(server_dir);
 
@@ -269,6 +346,13 @@ void RunServer(const std::string& port_no, const std::string& server_dir) {
     std::cout << "Server listening on " << server_address << std::endl;
     log(INFO, "Server listening on " + server_address);
 
+    while (server_running) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    server->Shutdown();
+    log(INFO, "Coordinator not detected, killing server...");
+
+
     server->Wait();
 }
 
@@ -278,45 +362,45 @@ int main(int argc, char** argv) {
     std::string server_id = "1";
     std::string cluster_id = "1";
     std::string coordinator_port = "9090";
-
+    std::atomic<bool> server_running(true);
     int opt = 0;
-while ((opt = getopt(argc, argv, "c:s:h:k:p:")) != -1) {
-    switch (opt) {
-        case 'c':
-            cluster_id = optarg;
-            break;
-        case 's':
-            server_id = optarg;
-            break;
-        case 'h':
-            coordinator_ip = optarg;
-            break;
-        case 'k':
-            coordinator_port = optarg;
-            break;
-        case 'p':
-            port = optarg;
-            break;
-        default:
-            std::cerr << "Invalid Command Line Argument\n";
-            return 1;
+    while ((opt = getopt(argc, argv, "c:s:h:k:p:")) != -1) {
+        switch (opt) {
+            case 'c':
+                cluster_id = optarg;
+                break;
+            case 's':
+                server_id = optarg;
+                break;
+            case 'h':
+                coordinator_ip = optarg;
+                break;
+            case 'k':
+                coordinator_port = optarg;
+                break;
+            case 'p':
+                port = optarg;
+                break;
+            default:
+                std::cerr << "Invalid Command Line Argument\n";
+                return 1;
+        }
     }
-}
 
-    // Create the server directory
     std::string server_dir = "server_" + cluster_id + "_" + server_id;
     fs::create_directories(server_dir);
 
-    // Initialize logging
     std::string log_file_name = "server-" + port;
-    log(INFO, "Logging Initialized. Server starting...");
 
-    // Start the heartbeat thread
-    std::thread heartbeat_thread(sendHeartbeat, coordinator_ip, coordinator_port, cluster_id, server_id, port);
-    heartbeat_thread.detach();  // Run independently
+    std::thread heartbeat_thread(sendHeartbeat, coordinator_ip, coordinator_port, cluster_id, server_id, port, std::ref(server_running));
+    //heartbeat_thread.detach();
 
-    // Start the server
-    RunServer(port, server_dir);
+    RunServer(port, server_dir, server_running);
+    if (heartbeat_thread.joinable()) {
+        heartbeat_thread.join();
+    }
+
 
     return 0;
 }
+

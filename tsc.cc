@@ -9,7 +9,7 @@
 #include "client.h"
 
 #include "sns.grpc.pb.h"
-#include "coordinator.grpc.pb.h"  // Include coordinator definitions
+#include "coordinator.grpc.pb.h"
 #include "coordinator.pb.h"
 
 using grpc::Channel;
@@ -23,7 +23,7 @@ using csce662::ListReply;
 using csce662::Request;
 using csce662::Reply;
 using csce662::SNSService;
-using csce662::CoordService;    // Coordinator service
+using csce662::CoordService;
 using csce662::ID;
 using csce662::ServerInfo;
 
@@ -79,37 +79,34 @@ private:
 //
 //////////////////////////////////////////////////////////
 int Client::connectTo() {
-    // Connect to the coordinator
-    std::string coord_address = hostname + ":" + coordinator_port;
-    coord_stub_ = CoordService::NewStub(grpc::CreateChannel(coord_address, grpc::InsecureChannelCredentials()));
+  //connect to coord
+  std::string coord_address = hostname + ":" + coordinator_port;
+  coord_stub_ = CoordService::NewStub(grpc::CreateChannel(
+                        coord_address, grpc::InsecureChannelCredentials()));
 
-    // Create a request with the client ID (user ID)
-    ClientContext context;
-    ID request;
-    request.set_id(std::stoi(username));  // Use set_id as per your proto definition
+  ClientContext context;
+  ID request;
+  request.set_id(std::stoi(username));
 
-    // Get server info from the coordinator
-    ServerInfo server_info;
-    Status status = coord_stub_->GetServer(&context, request, &server_info);
-    if (!status.ok()) {
-        std::cerr << "Failed to get server info from Coordinator: " << status.error_message() << std::endl;
-        return -1;
-    }
+  //retrieve server info
+  ServerInfo server_info;
+  Status status = coord_stub_->GetServer(&context, 
+                          request, &server_info);
+  if (!status.ok()) {
+      std::cerr << "Failed to get server info from Coordinator: " << status.error_message() << std::endl;
+      return -1;
+  }
+  server_ip = server_info.hostname();
+  server_port = server_info.port();
 
-    // Extract server IP and port
-    server_ip = server_info.hostname();  // Use hostname() method
-    server_port = server_info.port();    // Use port() method
+  std::string server_address = server_ip + ":" + server_port;
+  stub_ = SNSService::NewStub(grpc::CreateChannel(server_address, grpc::InsecureChannelCredentials()));
 
-    // Connect to the assigned server
-    std::string server_address = server_ip + ":" + server_port;
-    stub_ = SNSService::NewStub(grpc::CreateChannel(server_address, grpc::InsecureChannelCredentials()));
+  IReply ire = Login();
+  if (!ire.grpc_status.ok() or (ire.comm_status == FAILURE_ALREADY_EXISTS))
+      return -1;
 
-    // Login to the server
-    IReply ire = Login();
-    if (!ire.grpc_status.ok() || (ire.comm_status == FAILURE_ALREADY_EXISTS)) {
-        return -1;
-    }
-    return 1;
+  return 1;
 }
 
 IReply Client::processCommand(std::string& input)
@@ -216,8 +213,6 @@ void Client::processTimeline()
 }
 
 
-
-
 ///////////////////////////////////////////
 // List Command
 //////////////////////////////////////////
@@ -308,9 +303,9 @@ IReply Client::Login() {
     Reply reply;
     ClientContext context;
 
-     Status status = stub_->Login(&context, request, &reply);
+    Status status = stub_->Login(&context, request, &reply);
 
-    IReply ire;  // Correct
+    IReply ire;
     ire.grpc_status = status;
     std::cout << "REPLY MESSAGE: " + reply.msg();
     if (reply.msg() == "you have already joined") {
@@ -361,29 +356,29 @@ void Client::Timeline(const std::string& username) {
 /////////////////////////////////////////////
 
 int main(int argc, char** argv) {
-    std::string hostname = "127.0.0.1";
-    std::string username = "default";
-    std::string coordinator_port = "9090";
-    int opt = 0;
-while ((opt = getopt(argc, argv, "h:u:k:")) != -1) {
-    switch (opt) {
-        case 'h':
-            hostname = optarg;
-            break;
-        case 'u':
-            username = optarg;
-            break;
-        case 'k':
-            coordinator_port = optarg;
-            break;
-        default:
-            std::cout << "Invalid Command Line Argument\n";
-            return 1;
-    }
-}
+  std::string hostname = "127.0.0.1";
+  std::string username = "default";
+  std::string coordinator_port = "9090";
+  int opt = 0;
+  while ((opt = getopt(argc, argv, "h:u:k:")) != -1) {
+      switch (opt) {
+          case 'h':
+              hostname = optarg;
+              break;
+          case 'u':
+              username = optarg;
+              break;
+          case 'k':
+              coordinator_port = optarg;
+              break;
+          default:
+              std::cout << "Invalid Command Line Argument\n";
+              return 1;
+      }
+  }
 
-    Client myc(hostname, username, coordinator_port);
-    myc.run();
+  Client myc(hostname, username, coordinator_port);
+  myc.run();
 
-    return 0;
+  return 0;
 }
